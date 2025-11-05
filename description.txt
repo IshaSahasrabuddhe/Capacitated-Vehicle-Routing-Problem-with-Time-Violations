@@ -1,0 +1,333 @@
+🧩 Overview: What does this code do?
+
+The goal is to solve the Capacitated Vehicle Routing Problem with Time Windows (VRPTW):
+
+Assign a set of clients (each with coordinates, demand, and a time window) to a limited number of vehicles (each with capacity) and compute optimal delivery/pickup routes that minimize travel distance while respecting time windows and capacity constraints.
+
+This is an NP-hard combinatorial optimization problem, so exact solvers (like OR-Tools) are too slow for real-time demos.
+Hence, this code uses a multi-stage heuristic pipeline that balances speed and quality.
+
+🚦 Overall Algorithm Flow
+
+Let’s first summarize the entire flow inside solve_vrp_tw(), since it orchestrates everything:
+
+Input Preparation:
+Receive clients’ coordinates, demands, and time windows.
+
+Step 1 – Clustering:
+Use a time-window-aware clustering algorithm (tw_aware_clusters) to assign clients to vehicle groups.
+
+Step 2 – Force even distribution (optional):
+If force_all_vehicles=True, all vehicles get roughly equal numbers of clients.
+
+Step 3 – Route Construction for each cluster:
+For each cluster, build an initial route using
+→ Time-window-aware insertion heuristic (build_route_by_insertion_tw),
+then refine using
+→ 2-opt and Or-opt local search optimizations.
+
+Step 4 – Redistribute workload:
+Balance load and lateness among routes with
+→ redistribute_workload() and redistribute_to_use_all_vehicles() (if needed).
+
+Step 5 – Compute metrics:
+Total distance, lateness counts, per-route loads, etc.
+
+Step 6 – Visualization:
+plot_solution() draws a route map using Matplotlib.
+
+🧱 Utility + Data Setup Functions
+1️⃣ convert_numpy(obj)
+
+Recursively converts NumPy datatypes (e.g., np.int64) into native Python types.
+Useful for JSON serialization.
+
+2️⃣ make_template_dataframe()
+
+Creates a simple example DataFrame for testing:
+
+id | x  | y  | demand | tw_start | tw_end | service
+A  | 10 | 4  |   1    | 0        | 50     | 2
+B  | -5 | -12|   2    | 10       | 30     | 3
+C  | 15 | 8  |   1    | 5        | 20     | 1
+
+3️⃣ parse_uploaded_csv(file)
+
+Parses an uploaded CSV file, ensuring all required columns (id, x, y, demand) exist.
+Optional ones (tw_start, tw_end, service) get defaults.
+
+This ensures robustness for user uploads.
+
+4️⃣ generate_random_instance(...)
+
+Creates a synthetic dataset of random client coordinates, demands, and time windows.
+Used when users click "Generate Random Data" in the Gradio UI.
+
+📐 Geometry Helpers
+5️⃣ euclid(a, b)
+
+Computes Euclidean distance between two points.
+
+𝑑
+(
+𝑎
+,
+𝑏
+)
+=
+(
+𝑥
+𝑎
+−
+𝑥
+𝑏
+)
+2
++
+(
+𝑦
+𝑎
+−
+𝑦
+𝑏
+)
+2
+d(a,b)=
+(x
+a
+	​
+
+−x
+b
+	​
+
+)
+2
++(y
+a
+	​
+
+−y
+b
+	​
+
+)
+2
+	​
+
+6️⃣ total_distance(points)
+
+Sums up pairwise Euclidean distances for a sequence of points, used to compute route length.
+
+🧮 Stage 1: Time-window-aware Clustering
+
+Function: tw_aware_clusters(df, depot, n_vehicles, capacity)
+
+Goal:
+
+Group clients into clusters (vehicle assignments) considering:
+
+Geographic proximity (angle from depot),
+
+Time window urgency, and
+
+Vehicle capacity.
+
+Steps:
+
+Compute each client’s angle and distance from the depot.
+
+Compute a "time window urgency" score:
+
+tw_urgency
+=
+𝑡
+𝑤
+_
+𝑒
+𝑛
+𝑑
+𝑑
+𝑖
+𝑠
+𝑡
+𝑎
+𝑛
+𝑐
+𝑒
++
+1
+tw_urgency=
+distance+1
+tw_end
+	​
+
+
+→ clients with tight windows near the depot are prioritized earlier.
+
+Sort all clients by urgency and angle.
+
+Sequentially assign them to vehicles until the vehicle’s capacity is full, then start a new one.
+
+Outcome:
+
+clusters = list of index groups, one per vehicle.
+
+🕓 Stage 2: Route Scheduling
+
+Function: compute_schedule_for_route(route_idxs, depot, df)
+
+Purpose:
+
+Simulates the timeline of visiting each stop:
+
+Calculates arrival, waiting, and departure times.
+
+Tracks lateness if arrival > tw_end.
+
+Outputs:
+
+arrivals, departures
+
+lateness_count, total_lateness, max_lateness
+
+feasible: True if all time windows satisfied.
+
+🧩 Stage 3: Route Construction (Insertion Heuristic)
+
+Function: build_route_by_insertion_tw()
+
+Algorithm: Time-window-prioritized insertion heuristic
+Intuition:
+
+Start with the most urgent client, then iteratively insert remaining clients into the best position minimizing:
+
+Cost
+=
+distance
++
+8000
+×
+total_lateness
+Cost=distance+8000×total_lateness
+Steps:
+
+Choose the first stop with the tightest deadline (min urgency_score).
+
+For each remaining client:
+
+Try inserting at every position in the route.
+
+Compute new distance and lateness penalty.
+
+Pick the position with the lowest cost.
+
+Repeat until all clients are inserted.
+
+This builds an initial feasible route.
+
+🔁 Stage 4: Local Search Optimization
+
+After constructing initial routes, local search tries to improve them using 2-opt and Or-opt heuristics.
+
+🔹 2-opt (two_opt_tw)
+
+A classical route optimization:
+
+Select two edges (A→B and C→D).
+
+Reverse the segment between them (B…C).
+
+Accept if total cost (distance + lateness) decreases.
+
+Iterates until no improvement.
+
+Effect: Removes crossing paths, shortens routes.
+
+🔹 Or-opt (or_opt_tw)
+
+Another local search move:
+
+Take small subsequences (1 or 2 clients) and insert them at a new location in the same route.
+
+Recalculate cost and accept improvement.
+
+Effect: Fine-tunes route order, balances lateness and distance.
+
+⚙️ Stage 5: Multi-phase Route Builder
+
+Function: build_route_for_cluster_tw()
+
+Just chains all previous heuristics:
+
+route = build_route_by_insertion_tw(...)
+route = two_opt_tw(route, ...)
+route = or_opt_tw(route, ...)
+
+⚖️ Stage 6: Redistributing Workload
+redistribute_to_use_all_vehicles()
+
+If some vehicles are unused, this function:
+
+Finds the most problematic route (largest lateness),
+
+Moves the most problematic client (largest lateness or tightest deadline) into an empty route,
+
+Rebuilds both routes.
+
+redistribute_workload()
+
+Balances loads between overloaded and underused routes:
+
+Moves low-demand clients from heavy → light vehicles,
+
+Ensures route distances and capacities are recalculated.
+
+🧠 Stage 7: Main Solver (solve_vrp_tw())
+
+This is the heart that combines all the algorithms.
+
+Pipeline Summary:
+
+Step	Function	Purpose
+1	tw_aware_clusters	Cluster clients geographically and temporally
+2	(Optional) Force even assignment	Ensure all vehicles are used
+3	build_route_for_cluster_tw	Build + optimize each route
+4	redistribute_workload	Balance load and lateness
+5	Compute metrics	Total distance, lateness
+6	Build assignments_table	For display in dashboard
+7	Return results	For UI + visualization
+📊 Stage 8: Visualization (plot_solution())
+
+Plots the depot as a square.
+
+Plots routes (lines between stops).
+
+Uses different colors per vehicle.
+
+Annotates stops with sequence numbers and time windows.
+
+Returns an in-memory PNG Image.
+
+🧠 Algorithms Used (Summary Table)
+Algorithm	Purpose	Type	Complexity	Heuristic/Exact
+TW-Aware Clustering	Assign clients to vehicles	Clustering	O(n log n)	Heuristic
+Insertion Heuristic	Build initial route	Construction	O(n²)	Heuristic
+2-opt	Remove crossing paths	Local Search	O(n²)	Heuristic
+Or-opt	Reorder small segments	Local Search	O(n²)	Heuristic
+Redistribution	Balance loads	Improvement	O(n²)	Heuristic
+Schedule Computation	Evaluate lateness/time	Evaluation	O(n)	Deterministic
+🔍 Key Design Highlights
+
+Penalty-based objective:
+Distance + lateness × weight
+balances travel efficiency and on-time performance.
+
+Incremental refinement:
+Clustering → Insertion → 2-opt → Or-opt → Redistribution.
+
+Robust data handling:
+Works for uploaded CSV or generated random data.
+
+Fast & scalable:
+Suitable for small-to-medium instances (< 100 clients).
